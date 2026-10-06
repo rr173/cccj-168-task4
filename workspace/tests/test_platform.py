@@ -423,6 +423,49 @@ class PlatformTest(PlatformBase):
         v = self.svc.verify_proof(d["decision_id"], tampered_proof=stored)
         self.assertFalse(v["verified"])
 
+    # 监管端把页面上未改动的证明 JSON 原样保存后再次送验（含落盘/重解析往返
+    # 以及同一对象重复送验）：原始内容未变必须通过，且调用方对象不得被改写
+    def test_unmodified_resaved_proof_passes_and_input_not_mutated(self):
+        cid = self.cid()
+        self.enroll_freeze_dose(cid)
+        self.close_windows()
+        sid = self.svc.create_snapshot("test", cid)["snapshot_id"]
+        d = self.two_votes_and_decide(sid)
+        stored = json.loads(self.conn.execute(
+            "SELECT proof_bundle FROM decisions WHERE id=?", (d["decision_id"],)
+        ).fetchone()["proof_bundle"])
+        # 页面下载（缩进、ensure_ascii=False）→ 保存 → 重新解析后原样送回
+        resaved = json.loads(json.dumps(stored, ensure_ascii=False, indent=2))
+        before = json.dumps(resaved, sort_keys=True)
+        v1 = self.svc.verify_proof(d["decision_id"], tampered_proof=resaved)
+        self.assertTrue(v1["verified"],
+                        msg=json.dumps(v1["checks"], ensure_ascii=False))
+        # 同一对象再次送验仍须通过（验证不得产生副作用）
+        v2 = self.svc.verify_proof(d["decision_id"], tampered_proof=resaved)
+        self.assertTrue(v2["verified"],
+                        msg=json.dumps(v2["checks"], ensure_ascii=False))
+        self.assertIn("proof_hash", resaved)
+        self.assertEqual(json.dumps(resaved, sort_keys=True), before)
+        # 历史决定的库内校验路径不受影响
+        self.assertTrue(self.svc.verify_proof(d["decision_id"])["verified"])
+
+    # 真正改动字段后送验仍须拒绝（proof_hash 对不上）
+    def test_resaved_proof_with_changed_field_still_rejected(self):
+        cid = self.cid()
+        self.enroll_freeze_dose(cid)
+        self.close_windows()
+        sid = self.svc.create_snapshot("test", cid)["snapshot_id"]
+        d = self.two_votes_and_decide(sid)
+        stored = json.loads(self.conn.execute(
+            "SELECT proof_bundle FROM decisions WHERE id=?", (d["decision_id"],)
+        ).fetchone()["proof_bundle"])
+        changed = json.loads(json.dumps(stored, ensure_ascii=False, indent=2))
+        changed["action"] = "stop"
+        v = self.svc.verify_proof(d["decision_id"], tampered_proof=changed)
+        self.assertFalse(v["verified"])
+        self.assertTrue(any(c["check"] == "proof_hash_unchanged" and not c["passed"]
+                            for c in v["checks"]))
+
     def test_forged_signature_rejected(self):
         cid = self.cid()
         self.enroll_freeze_dose(cid)

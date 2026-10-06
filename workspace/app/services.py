@@ -1151,13 +1151,15 @@ class Services:
         if row is None:
             raise NotFound(f"决定 {decision_id}")
         stored = json.loads(row["proof_bundle"])
-        proof = tampered_proof or stored
+        proof = dict(tampered_proof) if tampered_proof is not None else stored
+        # 绝不就地修改调用方传入的证明（监管端可能对同一对象多次送验）：
+        # 嵌入哈希单独读取，重算时在过滤视图中排除 proof_hash。
         checks = []
 
         def check(name, ok, detail=""):
             checks.append({"check": name, "passed": bool(ok), "detail": detail})
 
-        embedded_hash = proof.pop("proof_hash", None) if tampered_proof else proof.get("proof_hash")
+        embedded_hash = proof.get("proof_hash")
         recomputed = canonical_hash({k: v for k, v in proof.items() if k != "proof_hash"})
         check("proof_hash_unchanged", recomputed == row["proof_hash"] == embedded_hash,
               f"recomputed={recomputed[:12]}")
