@@ -129,7 +129,7 @@ python3 -m unittest tests.test_platform -v
 - `app/store.py` — SQLite schema、哈希链追加 `append_event`、`verify_chain`
 - `app/services.py` — 领域服务：冻结/给药/暂停/AE/缺失/替补/规则/快照/投票/断网草稿/决定/证明/稽核归档
 - `app/rules.py` — 版本化规则规格与引擎（严重度→DLT→bands→建议）
-- `app/crypto.py` — 规范 JSON / SHA-256 / HMAC
+- `app/crypto.py` — 规范 JSON / SHA-256 / HMAC（数值相等的 JSON 数字跨端同字节：`10.0` 与 `10` 视为同一数字，页面保存未改动的 JSON 再校验不被误判）
 - `app/clock.py` — 可注入时钟（观察窗判定唯一时间来源）
 - `app/server.py` + `app/web/index.html` — REST API 与安全工作台（含断网模拟、草稿队列与稽核归档台）
-- `tests/test_platform.py` — 44 个不变量测试
+- `tests/test_platform.py` — 50 个不变量测试

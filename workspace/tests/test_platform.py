@@ -61,6 +61,51 @@ class PlatformBase(unittest.TestCase):
         return self.svc.issue_decision("test", sid)
 
 
+def browser_roundtrip(obj):
+    """模拟监管人员从页面下载 JSON、原样保存后再送入校验的跨端往返。
+
+    JSON 只有一种数字类型：浏览器 JSON.parse(JSON.stringify(x)) 会把整数取值的
+    浮点（10.0）变成整数（10），但不改变数值语义。文本经 json.dumps 再解析即可
+    复现该归一化（其余字符/空白/键序差异本就由规范序列化吸收）。
+    """
+    def coerce(x):
+        if isinstance(x, bool):
+            return x
+        if isinstance(x, float):
+            return int(x) if x.is_integer() and abs(x) < 1e21 else x
+        if isinstance(x, dict):
+            return {k: coerce(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [coerce(v) for v in x]
+        return x
+
+    return coerce(json.loads(json.dumps(obj, ensure_ascii=False, indent=2)))
+
+
+class CanonicalJsonTest(unittest.TestCase):
+    """规范序列化：数值相等的 JSON 数字必须给出相同字节（跨端一致性）。"""
+
+    def test_integral_float_equals_int(self):
+        self.assertEqual(canonical_json({"dose": 10.0}), canonical_json({"dose": 10}))
+        self.assertEqual(canonical_json({"dose": 10.0}), b'{"dose":10}')
+        self.assertEqual(canonical_hash({"dose": 10.0}), canonical_hash({"dose": 10}))
+
+    def test_non_integral_float_preserved(self):
+        self.assertEqual(canonical_json({"dose": 10.5}), b'{"dose":10.5}')
+        self.assertNotEqual(canonical_hash({"dose": 10.5}), canonical_hash({"dose": 10.6}))
+
+    def test_bool_null_nested_and_key_order(self):
+        self.assertEqual(canonical_json({"x": True, "y": False, "z": None}),
+                         b'{"x":true,"y":false,"z":null}')
+        self.assertEqual(canonical_json([{"v": 2.0}]), b'[{"v":2}]')
+        self.assertEqual(canonical_hash({"a": 1, "b": 2}),
+                         canonical_hash({"b": 2, "a": 1}))
+
+    def test_unicode_and_escapes(self):
+        self.assertEqual(canonical_json({"a": "中文\n\""}),
+                         '{"a":"中文\\n\\""}'.encode("utf-8"))
+
+
 class PlatformTest(PlatformBase):
     # ---------------------------------------------------------- 1 冻结
     def test_freeze_locks_dose_and_set(self):
@@ -422,6 +467,27 @@ class PlatformTest(PlatformBase):
         stored["action"] = "stop"
         v = self.svc.verify_proof(d["decision_id"], tampered_proof=stored)
         self.assertFalse(v["verified"])
+
+    # 监管人员从页面保存「未改动」的证明 JSON（浏览器把 10.0 归一为 10）后
+    # 再次送入校验入口：必须成功；真正改动字段仍须拒绝。
+    def test_proof_unchanged_page_save_verifies_but_tamper_rejected(self):
+        cid = self.cid()
+        self.enroll_freeze_dose(cid)
+        self.close_windows()
+        sid = self.svc.create_snapshot("test", cid)["snapshot_id"]
+        d = self.two_votes_and_decide(sid)
+        did = d["decision_id"]
+        # 未改动：仅经过页面保存/重载的跨端数字归一化
+        unchanged = browser_roundtrip(d["proof_bundle"])
+        v = self.svc.verify_proof(did, tampered_proof=unchanged)
+        self.assertTrue(v["verified"], msg=json.dumps(v["checks"], ensure_ascii=False))
+        # 真正改动动作字段：必须拒绝，且证明哈希项失配
+        tampered = browser_roundtrip(d["proof_bundle"])
+        tampered["action"] = "stop"
+        v2 = self.svc.verify_proof(did, tampered_proof=tampered)
+        self.assertFalse(v2["verified"])
+        self.assertTrue(any(not c["passed"] and c["check"] == "proof_hash_unchanged"
+                            for c in v2["checks"]))
 
     def test_forged_signature_rejected(self):
         cid = self.cid()
@@ -826,6 +892,24 @@ class ArchiveTest(PlatformBase):
         failed = {c["check"] for c in r["checks"] if not c["passed"]}
         self.assertIn("bundle_hash_unchanged", failed)
         self.assertIn("proof_hash_unchanged", failed)
+
+    # 监管人员把下载的归档包原样保存（浏览器归一化整数取值浮点）后再次送入
+    # 验真入口：必须成功；改动任何字段仍须拒绝。full 包还会重算事件哈希，
+    # 因此该用例同时覆盖日志载荷中 dose 的跨端往返。
+    def test_unchanged_page_saved_bundle_verifies_but_tamper_rejected(self):
+        cid, did = self.decided()
+        for policy in ("full", "redacted"):
+            v = self.svc.drive_archive(self.request(did, policy)["archive_id"])
+            b = self.bundle(v["archive_id"])
+            # 未改动：仅页面保存/重载
+            r = self.verify(browser_roundtrip(b))
+            self.assertTrue(r["verified"],
+                            msg=f"{policy}: " + json.dumps(r["checks"], ensure_ascii=False))
+            # 真正改动：拒绝
+            bad = browser_roundtrip(b)
+            bad["decision_proof"]["action"] = "stop"
+            r2 = self.verify(bad)
+            self.assertFalse(r2["verified"], msg=policy)
 
     # 归档不影响给药、断网草稿与既有证明校验
     def test_archive_does_not_affect_existing_flows(self):
